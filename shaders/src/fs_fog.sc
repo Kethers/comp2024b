@@ -1,13 +1,17 @@
 
 #include <bgfx_shader.sh>
 
-SAMPLER2D(s_color, 0);
-SAMPLER2D(s_depth, 1);
-uniform vec4 u_params[4];
+SAMPLER2D(s_depth, 0);
+SAMPLER3D(s_noise, 1);
+uniform vec4 u_params[8];
 
 #define u_camera_pos u_params[0].xyz
+#define u_noise_scale u_params[0].w // vec4 0
 #define u_box_min u_params[1].xyz
-#define u_box_max u_params[2].xyz
+#define u_density u_params[1].w // vec4 1
+#define u_box_max u_params[2].xyz // vec4 2
+#define u_color_min u_params[3] // vec4 3
+#define u_color_max u_params[4] // vec4 4
 
 vec3 to_screen_space(vec4 frag_coord) {
     return vec3(frag_coord.xy / u_viewRect.zw, frag_coord.z);
@@ -67,18 +71,52 @@ float3 random3(vec3 p) {
 	return fract(sin(p) * 43758.5453123);
 }
 
-float sample_fog(vec3 world_pos, vec3 camera_pos) {
-    vec3 view_dir = normalize(world_pos - camera_pos);
-    vec3 step_size = view_dir * 0.25f;
+bool ray_box_intersect(vec3 start, vec3 dir, vec3 b_min, vec3 b_max, out float tmin, out float tmax) {
+    vec3 dir_inv = 1.0f / dir;
 
-    vec3 curr_pos = camera_pos - step_size * random3(world_pos).x;
+    float tx1 = (b_min.x - start.x) * dir_inv.x;
+    float tx2 = (b_max.x - start.x) * dir_inv.x;
+
+    tmin = min(tx1, tx2);
+    tmax = max(tx1, tx2);
+
+    float ty1 = (b_min.y - start.y) * dir_inv.y;
+    float ty2 = (b_max.y - start.y) * dir_inv.y;
+
+    tmin = max(tmin, min(ty1, ty2));
+    tmax = min(tmax, max(ty1, ty2));
+
+    float tz1 = (b_min.z - start.z) * dir_inv.z;
+    float tz2 = (b_max.z - start.z) * dir_inv.z;
+
+    tmin = max(tmin, min(tz1, tz2));
+    tmax = min(tmax, max(tz1, tz2));
+
+    return tmax >= tmin;
+}
+
+float sample_fog(vec3 current_pos, vec3 backgroud_pos, vec3 camera_pos, vec3 box_extent) {
+    const int max_steps = 100;
+    const float step_size = 0.25f;
+
+    vec3 view_dir = normalize(current_pos - camera_pos);
+    float max_dist = distance(camera_pos, backgroud_pos);
+    vec3 vsize = view_dir * step_size;
+
+    vec3 curr_pos = camera_pos - vsize * random3(current_pos).x;
     float density = 0;
-    for (int i = 0; i < 100; ++i) {
-        curr_pos += step_size;
+    for (int i = 0; i < max_steps; ++i) {
+        curr_pos += vsize;
+
+        if(distance(camera_pos, curr_pos) > max_dist)
+            break;
+
         if(!is_in_box(curr_pos))
             continue;
 
-        density += 0.01;
+        // sample density here
+        float sample = texture3D(s_noise, (curr_pos - u_box_min) / box_extent * u_noise_scale).x;
+        density += sample * u_density;
     }
 
     return density;
@@ -87,12 +125,13 @@ float sample_fog(vec3 world_pos, vec3 camera_pos) {
 void main() {
     vec3 screen_space = to_screen_space(gl_FragCoord);
     float scene_depth = texture2D(s_depth, screen_space.xy).x;
-    vec3 scene_color = texture2D(s_color, screen_space.xy);
 
+    vec3 current_pos = screen_to_world_space(screen_space);
     screen_space.z = scene_depth;
-    vec3 world_pos = screen_to_world_space(screen_space);
-    vec3 fog_color = vec3(1, 1, 1);
-    float density = sample_fog(world_pos, u_camera_pos);
+    vec3 backgroud_pos = screen_to_world_space(screen_space);
 
-    gl_FragColor = vec4(scene_color * (1.0f - density) + density * fog_color, 1.0f);
+    vec3 box_extent = u_box_max - u_box_min;
+    float density = sample_fog(current_pos, backgroud_pos, u_camera_pos, box_extent);
+    vec4 color = mix(u_color_min, u_color_max, density);
+    gl_FragColor = vec4(color.xyz, density);
 }
