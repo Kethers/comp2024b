@@ -29,6 +29,8 @@
 #include <fstream>
 #include <memory>
 
+#define FOG_TEXTURE_SIZE 256
+
 class Blit {
 public:
     Blit() = default;
@@ -108,12 +110,8 @@ public:
     }
 
     void on_awake() override {
-        model           = Model::load_from_file_shared("./res/models/A_full.fbx");
-        printf(
-            "AABB: min(%f, %f, %f) max(%f, %f, %f)\n",
-            model->aabb.min.x, model->aabb.min.y, model->aabb.min.z,
-            model->aabb.max.x, model->aabb.max.y, model->aabb.max.z
-        );
+        model = Model::load_from_file_shared("./res/models/A_full.fbx");
+
         program         = std::make_shared<Shader>("./res/shaders/vs_blinn_phong.bin", "./res/shaders/fs_blinn_phong.bin");
         u_light_params  = bgfx::createUniform("u_light_params", bgfx::UniformType::Vec4, sizeof(LightParameters) / sizeof(glm::vec4));
         u_diffuse_color = bgfx::createUniform("u_diffuse_color", bgfx::UniformType::Vec4);
@@ -153,26 +151,19 @@ public:
         pe_params = bgfx::createUniform("u_params", bgfx::UniformType::Vec4, sizeof(FogParameters) / sizeof(glm::vec4));
         pe_shader = std::make_shared<Shader>("./res/shaders/vs_fog.bin", "./res/shaders/fs_fog.bin");
 
-        using std::ios_base;
-        std::ifstream in_file("./res/textures/Perlin_Noise.raw", ios_base::binary | ios_base::ate);
-        auto size = in_file.tellg();
-        in_file.seekg(0, ios_base::beg);
-        const bgfx::Memory* mem = bgfx::alloc(size);
-        in_file.read((char*)mem->data, mem->size);
-        in_file.close();
-        pe_noise_tex = bgfx::createTexture3D(256, 256, 256, false, bgfx::TextureFormat::R8, 0, mem);
-        pe_noise     = bgfx::createUniform("s_noise", bgfx::UniformType::Sampler);
+        load_fog_data("./res/textures/Perlin_Noise.raw");
+        pe_noise = bgfx::createUniform("s_noise", bgfx::UniformType::Sampler);
 
         fog_params.noise_scale = 1.0f;
-        fog_params.density     = 0.015f;
-        fog_params.color_min   = glm::vec4(0, 0, 0, 0);
-        fog_params.color_max   = glm::vec4(1, 1, 1, 1);
+        fog_params.density     = 0.5f;
+        fog_params.color_min   = glm::vec4(0.f, 0.432f, 1.0f, 0.422f);
+        fog_params.color_max   = glm::vec4(1, 0.0f, 0.0f, 1);
         fog_params.box_min     = model->aabb.min;
         fog_params.box_max     = model->aabb.max;
 
-        light_params.u_ambient_light   = glm::vec3(.1, .1, .1);
+        light_params.u_ambient_light   = glm::vec3(0.6, 0.6, 0.6);
         light_params.u_dir_light_dir   = Transform::FORWARD;
-        light_params.u_dir_light_color = glm::vec3(1, 1, 1);
+        light_params.u_dir_light_color = glm::vec3(0.27, 0.27, 0.27);
 
         blit.init();
     }
@@ -184,10 +175,11 @@ public:
         auto& render_comp   = scene.emplace<RenderComponent>(teapot, RenderComponent(model, program));
         render_comp.uniform = u_diffuse_color;
 
-        camera_entity = scene.create();
+        glm::vec3 init_pos = glm::vec3(3.0f, 1.2f, -2.0f);
+        camera_entity      = scene.create();
         scene.emplace<Camera>(camera_entity, Camera::perspective(glm::radians(60.f), (float)Screen::width() / Screen::height(), .1f, 300.f));
-        scene.emplace<Transform>(camera_entity, Transform::look_at(glm::vec3(-15, 15, -20), glm::vec3(0, 0, 0)));
-        scene.emplace<CameraControlData>(camera_entity, CameraControlData{ 10.0f, 30.0f });
+        scene.emplace<Transform>(camera_entity, Transform::look_at(init_pos, init_pos + Transform::FORWARD));
+        scene.emplace<CameraControlData>(camera_entity, CameraControlData{ 4.0f, 30.0f });
     }
 
     void on_update() override {
@@ -238,8 +230,7 @@ public:
     }
 
     void on_gui() override {
-        ImGui::ShowDemoWindow();
-        ImGui::Begin("Test", nullptr, 0);
+        ImGui::Begin("Control panel", nullptr, 0);
         {
             if (ImGui::BeginTabBar("menu")) {
                 if (ImGui::BeginTabItem("Control")) {
@@ -261,6 +252,30 @@ public:
             }
         }
         ImGui::End();
+
+        ImGui::SetNextWindowPos(ImVec2(10, 10));
+        ImGui::SetNextWindowSize(ImVec2(150.0f, 140.0f));
+        if (ImGui::Begin("Infomation", nullptr, ImGuiWindowFlags_NoDecoration)) {
+            Transform& trans      = scene.get<Transform>(camera_entity);
+            glm::vec3 right       = trans.right(); // we use right direction as it is always on X-Z plane
+            glm::vec2 dir         = glm::normalize(glm::vec2(right.x, right.z));
+            static const float pi = glm::pi<float>();
+            float angle           = acos(dir.x);
+            if (!signbit(dir.y)) {
+                angle = -angle;
+            }
+            draw_compass(angle, 100.0f, IM_COL32(100, 100, 150, 255), IM_COL32_WHITE);
+
+            int density = query_fog_density(trans.position);
+            ImGui::SameLine();
+            ImGui::VSliderInt("", ImVec2(25, 100.0f), &density, 0, 255);
+            float height = trans.position.y;
+            ImGui::PushItemWidth(-ImGui::GetContentRegionAvailWidth() * 0.3f);
+            ImGui::DragFloat("Height", &height, 0.0f, 0.0f, 0.0f, "%.2f", ImGuiSliderFlags_NoInput);
+        }
+        ImGui::End();
+
+        ImGui::ShowDemoWindow();
     }
 
     bool on_closing() override {
@@ -286,6 +301,78 @@ public:
     }
 
 private:
+    static void draw_compass(float angle, float size, ImU32 col_bg, ImU32 col_needle, float needle_scale = 0.8f) {
+        ImVec2 corner         = ImGui::GetCursorScreenPos();
+        float radius          = size / 2.0f;
+        ImVec2 center         = ImVec2(corner.x + radius, corner.y + radius);
+        auto& io              = ImGui::GetIO();
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+        draw_list->AddCircleFilled(center, radius, col_bg);
+
+        glm::vec2 points[]{
+            glm::vec2(0.0f, -1.0f),
+            glm::vec2(-0.2f, 0.0f),
+            glm::vec2(0.0f, 0.3f),
+            glm::vec2(0.2f, 0.0f)
+        };
+
+        angle        = -angle;
+        auto scale   = glm::mat2(radius * needle_scale);
+        auto rotate  = glm::mat2();
+        rotate[0][0] = cos(angle);
+        rotate[0][1] = -sin(angle);
+        rotate[1][0] = sin(angle);
+        rotate[1][1] = cos(angle);
+        auto mat     = rotate * scale;
+
+        auto offset = *(glm::vec2*)(&center);
+        for(auto& point: points) {
+            point = mat * point + offset;
+        }
+
+        ImVec2* im_points = (ImVec2*)points;
+        draw_list->AddConvexPolyFilled(im_points, std::size(points), col_needle);
+        ImGui::Dummy(ImVec2(2 * radius, 2 * radius));
+    }
+
+    void load_fog_data(const char* path) {
+        using std::ios_base;
+        std::ifstream in_file(path, ios_base::binary | ios_base::ate);
+        auto size = in_file.tellg();
+        in_file.seekg(0, ios_base::beg);
+        fog_data = std::vector<u8>(size);
+        in_file.read((char*)fog_data.data(), fog_data.size());
+        in_file.close();
+
+        const bgfx::Memory* mem = bgfx::copy(fog_data.data(), fog_data.size());
+        pe_noise_tex            = bgfx::createTexture3D(FOG_TEXTURE_SIZE, FOG_TEXTURE_SIZE, FOG_TEXTURE_SIZE, false, bgfx::TextureFormat::R8, 0, mem);
+    }
+
+    u8 query_fog_density(const glm::vec3& pos) {
+        if (glm::any(glm::lessThan(pos, model->aabb.min))
+            || glm::any(glm::lessThan(model->aabb.max, pos))) {
+            return 0.0f; // out of range
+        }
+
+        auto to_offset = [](const glm::uvec3 v) {
+            return v.z * FOG_TEXTURE_SIZE * FOG_TEXTURE_SIZE
+                   + v.y * FOG_TEXTURE_SIZE
+                   + v.x;
+        };
+
+        auto clamp = [](const glm::uvec3 v) {
+            return glm::clamp(v, glm::zero<glm::uvec3>(), glm::uvec3(FOG_TEXTURE_SIZE - 1));
+        };
+
+        glm::vec3 extent   = model->aabb.max - model->aabb.min;
+        glm::vec3 norm_pos = (pos - model->aabb.min) / extent;
+        glm::uvec3 uvw     = norm_pos * (float)FOG_TEXTURE_SIZE;
+
+        u32 offset = to_offset(uvw);
+
+        return fog_data[offset];
+    }
+
     void gui_control_tab() {
         const ImGuiTreeNodeFlags header_flags = ImGuiTreeNodeFlags_DefaultOpen;
 
@@ -299,7 +386,7 @@ private:
 
         if (ImGui::CollapsingHeader("Fog", header_flags)) {
             ImGui::SliderFloat("Scale", &fog_params.noise_scale, 0.0f, 1.0f);
-            ImGui::SliderFloat("Density", &fog_params.density, 0.0f, 0.1f);
+            ImGui::SliderFloat("Density", &fog_params.density, 0.0f, 1.0f);
 
             ImGuiColorEditFlags flags = ImGuiColorEditFlags_InputRGB
                                         | ImGuiColorEditFlags_PickerHueWheel
@@ -321,7 +408,7 @@ private:
 
             ImGui::ColorEdit3("Ambient", glm::value_ptr(light_params.u_ambient_light), flags);
             {
-                static float angle_yaw   = 0.0f;
+                static float angle_yaw   = 45.0f;
                 static float angle_pitch = 45.0f;
                 ImGui::Text("Direction");
                 ImGui::SliderFloat("Yaw", &angle_yaw, 0.0f, 360.0f);
@@ -448,6 +535,7 @@ private:
 
     Blit blit;
 
+    std::vector<u8> fog_data;
     FogParameters fog_params;
     bgfx::FrameBufferHandle main_fb;
     bgfx::UniformHandle pe_depth;
